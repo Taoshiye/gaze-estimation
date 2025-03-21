@@ -6,7 +6,7 @@ gaze360:
   image: "/media/ts/0074477d-81c5-4692-b399-7ccecf34dbb6/GazeEstimation/Gaze360/Image"
   label: "/media/ts/0074477d-81c5-4692-b399-7ccecf34dbb6/GazeEstimation/Gaze360/Label/train.label"
   # label: "/media/ts/0074477d-81c5-4692-b399-7ccecf34dbb6/GazeEstimation/Gaze360/Label/train_try.label"
-  # label: "/media/ts/0074477d-81c5-4692-b399-7ccecf34dbb6/GazeEstimation/Gaze360/Label/test.label"
+  valid: "/media/ts/0074477d-81c5-4692-b399-7ccecf34dbb6/GazeEstimation/Gaze360/Label/test.label"
 mpiiface:
   image: "/media/ts/0074477d-81c5-4692-b399-7ccecf34dbb6/GazeEstimation/MPIIFaceGaze/Image"
   label: "/media/ts/0074477d-81c5-4692-b399-7ccecf34dbb6/GazeEstimation/MPIIFaceGaze/Label"

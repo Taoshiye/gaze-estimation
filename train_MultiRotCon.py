@@ -17,6 +17,7 @@ from datetime import datetime
 import logging
 from torch.utils.tensorboard import SummaryWriter
 import os
+import utils
 os.environ["CUDA_VISIBLE_DEVICES"] = '1'
 
 
@@ -118,28 +119,34 @@ def train(args, dataset, valid_dataset):
                 torch.cuda.empty_cache()
                 # Acquire data
                 input = move_to_gpu(data['face'], args.device)
-                input_inc = move_to_gpu(data['face_inc'], args.device)
-                input_dec = move_to_gpu(data['face_dec'], args.device)
                 target = move_to_gpu(data['gaze'], args.device)
 
                 for k, item in enumerate(data):
                     if epoch == 1 and i == 0 and k < 1:
                         face_name = os.path.join(savepath, os.path.basename(data["name"][k])).replace('.jpg', '_face.jpg')
                         save_image(face_name, input[k].cpu().numpy())
-                        face_inc_name = os.path.join(savepath, os.path.basename(data["name"][k])).replace('.jpg', '_face_inc.jpg')
-                        save_image(face_inc_name, input_inc[k].cpu().numpy())
-                        face_dec_name = os.path.join(savepath, os.path.basename(data["name"][k])).replace('.jpg', '_face_dec.jpg')
-                        save_image(face_dec_name, input_dec[k].cpu().numpy())
         
                 # forward
-                gaze, gaze_dict, feature = net(input)
-                inc_gaze, inc_gaze_dict, inc_feature = net(input_inc)
-                dec_gaze, dec_gaze_dict, dec_feature = net(input_dec)
+                gaze, gaze_dict, rotmat_dict = net(input)
 
-                loss_gaze = lossfunc(gaze, target) + lossfunc(inc_gaze, target) + lossfunc(dec_gaze, target)
+                loss_gaze = lossfunc(gaze, target)
                 loss_rot_gaze = []
-                for key, output in gaze_dict.items():
-                    loss_value = lossfunc(output, target) + lossfunc(inc_gaze_dict[key], target) + lossfunc(dec_gaze_dict[key], target)
+                loss_degree_gaze_list = []
+                loss_degree_rotmat_list = []
+                for degree in args.degree:
+                    # 计算一个直接预测旋转视线损失
+                    rot_gaze = gaze_dict[f"out_{degree}_gaze"]
+                    target_degree = torch.add(target, degree)
+                    loss_degree_gaze = lossfunc(rot_gaze, target_degree)
+                    loss_degree_gaze_list.append(loss_degree_gaze)
+                    # 利用标签计算旋转矩阵损失
+                    tg_rot_matrix = utils.compute_rotation_matrix(target, target_degree)
+                    rot_matrix = rotmat_dict[f"rot_{degree}_matrix"]
+                    rot_matrix = rot_matrix.view(rot_matrix.shape[0], 3, 3)
+                    loss_degree_rotmat = lossfunc(rot_matrix, tg_rot_matrix)
+                    loss_degree_rotmat_list.append(loss_degree_rotmat)
+
+                    loss_value = loss_degree_gaze + loss_degree_rotmat
                     loss_rot_gaze.append(loss_value)
                 
                 [optimizer.zero_grad() for name, optimizer in optimizers.items()]
@@ -178,14 +185,16 @@ def train(args, dataset, valid_dataset):
                 """tensorboard writer"""
                 writer.add_scalar("train/loss_gaze", loss_gaze, cur)
                 for idx, degree in enumerate(args.degree):
-                    writer.add_scalar(f"train/loss_gaze/degree=[{degree}]", loss_rot_gaze[idx], cur)
+                    writer.add_scalar(f"train/loss_degree_gaze/degree=[{degree}]", loss_degree_gaze_list[idx], cur)
+                for idx, degree in enumerate(args.degree):
+                    writer.add_scalar(f"train/loss_degree_rotmat/degree=[{degree}]", loss_degree_rotmat_list[idx], cur)
 
                 # print logs
                 if i % 20 == 0:
                     timeend = time.time()
                     resttime = (timeend - timebegin)/cur * (total-cur)/3600
-                    log = f"[{epoch}/{args.epoches}]: [{i}/{length}] loss_gaze:{'%.8f' % loss_gaze} " \
-                        f"loss_results:{[f'{x:.8f}' for x in loss_rot_gaze]} lr:{current_lr}, rest time:{resttime:.2f}h"
+                    log = f"[{epoch}/{args.epoches}]: [{i}/{length}] loss_gaze:{'%.8f' % loss_gaze} loss_degree_rotmat:{[f'{x:.8f}' for x in loss_degree_rotmat_list]} " \
+                        f"loss_degree_gaze:{[f'{x:.8f}' for x in loss_degree_gaze_list]} lr:{current_lr}, rest time:{resttime:.2f}h"
                     logging.info(log)
                     outfile.write(log + "\n")
                     sys.stdout.flush()   
@@ -231,7 +240,10 @@ def valid(args, ckpt, dataset):
             target = move_to_gpu(data['gaze'], args.device)
             traget = target.float()*np.pi/180
 
-            gaze, gaze_dict, features = net(input)
+            gaze, gaze_dict, rotmat_dict = net(input)
+            for degree in args.degree:
+                rot_gaze = gaze_dict[f"out_{degree}_gaze"]
+                gaze_dict[f"out_{degree}_gaze"] = torch.sub(rot_gaze, degree)
             gaze_list = torch.cat((gaze.unsqueeze(0), torch.stack(list(gaze_dict.values()), dim=0)), dim=0)
             pre_gaze = gaze_list.mean(dim=0)
             pre_gaze = pre_gaze*np.pi/180
@@ -286,10 +298,13 @@ def test(args, dataset):
                     for j, data in enumerate(dataset):
                         input = move_to_gpu(data['face'], args.device)
                         target = move_to_gpu(data['gaze'], args.device)
-                        traget = target.float()*np.pi/180
+                        target = target.float()*np.pi/180
                         names = data["name"]
 
-                        gaze, gaze_dict, features = net(input)
+                        gaze, gaze_dict, rotmat_dict = net(input)
+                        for degree in args.degree:
+                            rot_gaze = gaze_dict[f"out_{degree}_gaze"]
+                            gaze_dict[f"out_{degree}_gaze"] = torch.sub(rot_gaze, degree)
                         gaze_list = torch.cat((gaze.unsqueeze(0), torch.stack(list(gaze_dict.values()), dim=0)), dim=0)
                         pre_gaze = gaze_list.mean(dim=0)
                         pre_gaze = pre_gaze*np.pi/180   

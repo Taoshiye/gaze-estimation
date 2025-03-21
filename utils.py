@@ -142,3 +142,96 @@ def save_image(face_name, img):
 
     # 保存图像
     cv2.imwrite(face_name, img)
+
+
+def gaze_to_vector(gaze):
+    """
+    将二维视线角 [yaw, pitch] 转换为三维单位向量。
+    支持批量输入，输入形状为 [B, 2]，输出形状为 [B, 3]。
+    """
+    # 将角度转换为弧度
+    yaw = torch.deg2rad(gaze[:, 0])  # 提取 yaw 并转换为弧度
+    pitch = torch.deg2rad(gaze[:, 1])  # 提取 pitch 并转换为弧度
+
+    # 计算三维单位向量
+    x = torch.cos(pitch) * torch.cos(yaw)
+    y = torch.cos(pitch) * torch.sin(yaw)
+    z = torch.sin(pitch)
+
+    # 堆叠成 [B, 3] 的形状
+    return torch.stack([x, y, z], axis=1)
+
+def compute_rotation_matrix(g1, g2):
+    """
+    通过两个三维单位向量 g1 和 g2 计算旋转矩阵 R。
+    支持批量输入，输入形状为 [B, 2]，输出形状为 [B, 3, 3]。
+    """
+    # 将 g1 和 g2 转换为三维单位向量
+    v1 = gaze_to_vector(g1)  # 形状 [B, 3]
+    v2 = gaze_to_vector(g2)  # 形状 [B, 3]
+
+    # 计算旋转轴
+    k = torch.cross(v1, v2, dim=1)  # 形状 [B, 3]
+    k_norm = torch.norm(k, dim=1, keepdim=True)  # 计算范数，形状 [B, 1]
+    k = k / (k_norm + 1e-14)  # 归一化，避免除以零
+
+    # 计算旋转角度
+    dot_product = torch.sum(v1 * v2, dim=1)  # 点积，形状 [B]
+    theta = torch.acos(torch.clamp(dot_product, -1.0, 1.0))  # 形状 [B]
+
+    # 使用罗德里格斯公式计算旋转矩阵
+    K = torch.zeros((g1.shape[0], 3, 3), device=g1.device)  # 形状 [B, 3, 3]
+    K[:, 0, 1] = -k[:, 2]
+    K[:, 0, 2] = k[:, 1]
+    K[:, 1, 0] = k[:, 2]
+    K[:, 1, 2] = -k[:, 0]
+    K[:, 2, 0] = -k[:, 1]
+    K[:, 2, 1] = k[:, 0]
+
+    I = torch.eye(3, device=g1.device).unsqueeze(0).repeat(g1.shape[0], 1, 1)  # 形状 [B, 3, 3]
+    sin_theta = theta.unsqueeze(1).unsqueeze(1)  # 形状 [B, 1, 1]
+    cos_theta = torch.cos(theta).unsqueeze(1).unsqueeze(1)  # 形状 [B, 1, 1]
+
+    # 计算旋转矩阵 R
+    R = I + sin_theta * K + (1 - cos_theta) * torch.bmm(K, K)  # 形状 [B, 3, 3]
+
+    return R
+
+
+def compute_rotation_degree(R, g1):
+    # 将 g1 转换为三维单位向量
+    v1 = gaze_to_vector(g1)  # 形状 [B, 3]
+
+    # 验证旋转矩阵 R 是否正确将 v1 旋转到 v2
+    v2_rotated = torch.bmm(R, v1.unsqueeze(-1)).squeeze(-1)  # 形状 [B, 3]
+
+    # 从旋转后的向量中提取新的 yaw 和 pitch
+    yaw2 = torch.atan2(v2_rotated[:, 1], v2_rotated[:, 0])  # 形状 [B]
+    pitch2 = torch.asin(v2_rotated[:, 2])  # 形状 [B]
+
+    # 将弧度转换回角度
+    g2_rot = torch.rad2deg(torch.stack([yaw2, pitch2], dim=1))  # 形状 [B, 2]
+
+    # 确保角度在 -180 到 180 之间
+    g2_rot = (g2_rot + 180) % 360 - 180
+
+    return g2_rot
+
+
+if __name__ == "__main__":
+    # 示例使用
+    g1 = torch.tensor([[0, 0], [10, 20], [30, 40]])  # 初始视线角 [yaw, pitch]，形状 [3, 2]
+    g2 = torch.tensor([[2, 1], [12, 21], [32, 41]])  # 旋转后的视线角 [yaw + theta, pitch + theta]，形状 [3, 2]
+
+    # 计算旋转矩阵 R
+    R = compute_rotation_matrix(g1, g2)
+    g2_rotated = compute_rotation_degree(R, g1)
+
+    print("旋转矩阵 R:")
+    print(R)
+    print("\n旋转前的视线角 g1:")
+    print(g1)
+    print("\n旋转后的视线角 g2:")
+    print(g2)
+    print("\n旋转后的视线角 g2_rotated:")
+    print(g2_rotated)

@@ -6,13 +6,15 @@ import torch.nn.functional as F
 
 """视线预测多层感知器"""
 class mlp_gazeEs(nn.Module):
-    def __init__(self, channel, drop_p=0.5):
+    def __init__(self, channel, flag=True, drop_p=0.2):
         super(mlp_gazeEs, self).__init__()
+        self.flag = flag
         self.avgpool = nn.AdaptiveAvgPool2d((1,1))
         self.drop = nn.Dropout(drop_p)
         self.fc1 = nn.Linear(channel, 1000)
         self.fc2 = nn.Linear(1000, 256)
-        self.fc3 = nn.Linear(256, 2)
+        self.fc3_g = nn.Linear(256, 2)
+        self.fc3_m = nn.Linear(256, 9)
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -26,8 +28,14 @@ class mlp_gazeEs(nn.Module):
         x = x.view(x.size(0), -1)
         x = nn.ReLU()(self.fc1(x))
         x = self.fc2(x)
-        x = self.fc3(self.drop(x))
-        return x
+        x = self.drop(x)
+        if self.flag:
+            x_g = self.fc3_g(x)
+            x_m = self.fc3_m(x)
+            return x_g, x_m
+        else:
+            x_g = self.fc3_g(x)
+            return x_g
     
 
 """弱回归器"""
@@ -83,23 +91,25 @@ class RotConGE(nn.Module):
         elif backbone == "res50":
             self.base_model = resnet50(pretrained=True)
 
-        self.gazeEs = fc_gazeEs(self.img_feature_dim)
+        self.gazeEs = mlp_gazeEs(self.img_feature_dim, flag=False)
         # Create a ModuleList for the rotate degree outputs
         self.rotate_gazeEs = nn.ModuleList([
-          fc_gazeEs(self.img_feature_dim) for _ in range(len(degree_list))
+          mlp_gazeEs(self.img_feature_dim) for _ in range(len(degree_list))
         ])
 
     def forward(self, x_in):
         base_features = self.base_model(x_in)
         output_gaze = self.gazeEs(base_features)
 
-        angular_sub_output = {}
+        angular_output = {}
+        rotation_matrix = {}
         for i, layer in enumerate(self.rotate_gazeEs):
             degree = self.degree[i]
-            output_degree_gaze = layer(base_features)
-            angular_sub_output[f"out_{degree}_gaze"] = torch.sub(output_degree_gaze, degree)
+            output_degree_gaze, output_rotation_matrix = layer(base_features)
+            angular_output[f"out_{degree}_gaze"] = output_degree_gaze
+            rotation_matrix[f"rot_{degree}_matrix"] = output_rotation_matrix
 
-        return output_gaze, angular_sub_output, base_features
+        return output_gaze, angular_output, rotation_matrix
 
 
 
@@ -122,6 +132,7 @@ class MinimumVarianceLoss(nn.Module):
         return torch.mean(std)
 
 
+"""一种复杂回归"""
 class GAZEnet(nn.Module):
     def __init__(self, drop_p=0.5):
         super(GAZEnet, self).__init__()
