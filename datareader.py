@@ -99,7 +99,8 @@ class loader(Dataset):
         elif dataset_type == "mpiiface":
             newlines.append(lines[7])  # mpiigaze是7
         label = np.array(newlines[1].split(",")).astype("float")
-        if abs((label[0]*180/np.pi)) <= self.angle and abs((label[1]*180/np.pi)) <= self.angle:
+        # yaw的范围[-180,180],pitch的范围 [-90,90]
+        if abs((label[0]*180/np.pi)) <= self.angle and abs((label[1]*180/np.pi)) <= self.angle/2:
             return newlines
         else:
             return None

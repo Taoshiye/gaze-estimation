@@ -3,6 +3,7 @@ import numpy as np
 import math
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 class AverageMeter(object):
     """
@@ -199,33 +200,65 @@ def compute_rotation_matrix(g1, g2):
 
 
 def compute_rotation_degree(R, g1):
+    """
+    通过旋转矩阵 R 和原始视线角 g1 求出旋转后的视线角 g2。
+    存在bug：旋转角如果超过范围，计算会出错。yaw[-180,180],pitch[-90,90]
+    """
     # 将 g1 转换为三维单位向量
     v1 = gaze_to_vector(g1)  # 形状 [B, 3]
 
     # 验证旋转矩阵 R 是否正确将 v1 旋转到 v2
     v2_rotated = torch.bmm(R, v1.unsqueeze(-1)).squeeze(-1)  # 形状 [B, 3]
+    # 归一化 v2_rotated（单位向量）
+    v2_rotated_norm = F.normalize(v2_rotated, p=2, dim=1)  # p=2 表示 L2 范数，dim=1 对每个样本的 3D 向量归一化
 
     # 从旋转后的向量中提取新的 yaw 和 pitch
-    yaw2 = torch.atan2(v2_rotated[:, 1], v2_rotated[:, 0])  # 形状 [B]
-    pitch2 = torch.asin(v2_rotated[:, 2])  # 形状 [B]
+    pitch2 = torch.asin(v2_rotated_norm[:, 2])  # 形状 [B]
+    cos_pitch2 = torch.cos(pitch2) + 1e-10
+    yaw2 = torch.atan2(v2_rotated_norm[:, 1]/cos_pitch2, v2_rotated_norm[:, 0]/cos_pitch2)
 
-    # 将弧度转换回角度
     g2_rot = torch.rad2deg(torch.stack([yaw2, pitch2], dim=1))  # 形状 [B, 2]
 
-    # 确保角度在 -180 到 180 之间
-    g2_rot = (g2_rot + 180) % 360 - 180
+    # # 确保角度在 -180 到 180 之间
+    # g2_rot = (g2_rot + 180) % 360 - 180
 
     return g2_rot
 
 
+def inverse_rotation(R, g2):
+    """
+    通过旋转矩阵 R 和旋转后的视线角 g2 反向求出原始视线角 g1。
+    """
+    # 将 g2 转换为三维单位向量
+    v2 = gaze_to_vector(g2)  # 形状 [B, 3]
+
+    # 使用旋转矩阵 R 的逆矩阵将 v2 旋转回 v1
+    R_inv = torch.inverse(R)  # 计算逆矩阵
+    R_transpose = R.transpose(1, 2) # 计算 R 的转置
+    v1_rotated = torch.bmm(R_transpose, v2.unsqueeze(-1)).squeeze(-1)  # 形状 [B, 3]
+    # 归一化 v1_rotated（单位向量）
+    v1_rotated_norm = F.normalize(v1_rotated, p=2, dim=1)  # p=2 表示 L2 范数，dim=1 对每个样本的 3D 向量归一化
+
+    # 从旋转后的向量中提取新的 yaw 和 pitch
+    pitch1 = torch.asin(v1_rotated_norm[:, 2])  # 形状 [B]
+    cos_pitch1 = torch.cos(pitch1) + 1e-10
+    yaw1 = torch.atan2(v1_rotated_norm[:, 1]/cos_pitch1, v1_rotated_norm[:, 0]/cos_pitch1)
+
+    # 将弧度转换回角度
+    g1_inverted = torch.rad2deg(torch.stack([yaw1, pitch1], dim=1))  # 形状 [B, 2]
+
+    return g1_inverted
+
+
 if __name__ == "__main__":
     # 示例使用
-    g1 = torch.tensor([[0, 0], [10, 20], [30, 40]])  # 初始视线角 [yaw, pitch]，形状 [3, 2]
-    g2 = torch.tensor([[2, 1], [12, 21], [32, 41]])  # 旋转后的视线角 [yaw + theta, pitch + theta]，形状 [3, 2]
+    g1 = torch.tensor([[179, 86], [10, 20], [30, 40]])  # 初始视线角 [yaw, pitch]，形状 [3, 2]
+    g2 = torch.tensor([[181, 92], [30, 40], [60, 70]])  # 旋转后的视线角 [yaw + theta, pitch + theta]，形状 [3, 2]
 
     # 计算旋转矩阵 R
     R = compute_rotation_matrix(g1, g2)
     g2_rotated = compute_rotation_degree(R, g1)
+    g1_inverted = inverse_rotation(R, g2)
 
     print("旋转矩阵 R:")
     print(R)
@@ -235,3 +268,5 @@ if __name__ == "__main__":
     print(g2)
     print("\n旋转后的视线角 g2_rotated:")
     print(g2_rotated)
+    print("\n反向求出的视线角 g1_inverted:")
+    print(g1_inverted)

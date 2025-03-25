@@ -138,13 +138,8 @@ def train(args, dataset, valid_dataset):
                 loss_degree_gaze_list = []
                 loss_degree_rotmat_list = []
                 for degree in args.degree:
-                    # 计算一个直接预测旋转视线损失
-                    rot_gaze = gaze_dict[f"out_{degree}_gaze"]
-                    inc_rot_gaze = inc_gaze_dict[f"out_{degree}_gaze"]
-                    dec_rot_gaze = dec_gaze_dict[f"out_{degree}_gaze"]
+                    # 计算旋转后的角度
                     target_degree = torch.add(target, degree)
-                    loss_degree_gaze = lossfunc(rot_gaze, target_degree) + lossfunc(inc_rot_gaze, target_degree) + lossfunc(dec_rot_gaze, target_degree)
-                    loss_degree_gaze_list.append(loss_degree_gaze)
                     # 利用标签计算旋转矩阵损失
                     tg_rot_matrix = utils.compute_rotation_matrix(target, target_degree)
                     rot_matrix = rotmat_dict[f"rot_{degree}_matrix"]
@@ -155,6 +150,16 @@ def train(args, dataset, valid_dataset):
                     dec_rot_matrix = dec_rot_matrix.view(dec_rot_matrix.shape[0], 3, 3)
                     loss_degree_rotmat = lossfunc(rot_matrix, tg_rot_matrix) + lossfunc(inc_rot_matrix, tg_rot_matrix) + lossfunc(dec_rot_matrix, tg_rot_matrix)
                     loss_degree_rotmat_list.append(loss_degree_rotmat)
+
+                    # 利用旋转矩阵还原旋转角为原角度
+                    rot_gaze = gaze_dict[f"out_{degree}_gaze"]
+                    inv_gaze = utils.inverse_rotation(rot_matrix, rot_gaze)
+                    inc_rot_gaze = inc_gaze_dict[f"out_{degree}_gaze"]
+                    inc_inv_gaze = utils.inverse_rotation(inc_rot_matrix, inc_rot_gaze)
+                    dec_rot_gaze = dec_gaze_dict[f"out_{degree}_gaze"]
+                    dec_inv_gaze = utils.inverse_rotation(dec_rot_matrix, dec_rot_gaze)
+                    loss_degree_gaze = lossfunc(inv_gaze, target) + lossfunc(inc_inv_gaze, target) + lossfunc(dec_inv_gaze, target)
+                    loss_degree_gaze_list.append(loss_degree_gaze)
 
                     loss_value = loss_degree_gaze + loss_degree_rotmat
                     loss_rot_gaze.append(loss_value)
@@ -253,7 +258,12 @@ def valid(args, ckpt, dataset):
             gaze, gaze_dict, rotmat_dict = net(input)
             for degree in args.degree:
                 rot_gaze = gaze_dict[f"out_{degree}_gaze"]
-                gaze_dict[f"out_{degree}_gaze"] = torch.sub(rot_gaze, degree)
+                rot_matrix = rotmat_dict[f"rot_{degree}_matrix"]
+                rot_matrix = rot_matrix.view(rot_matrix.shape[0], 3, 3)
+                inv_gaze = utils.inverse_rotation(rot_matrix, rot_gaze)
+                gaze_dict[f"out_{degree}_gaze"] = inv_gaze
+
+                # gaze_dict[f"out_{degree}_gaze"] = torch.sub(rot_gaze, degree)
             gaze_list = torch.cat((gaze.unsqueeze(0), torch.stack(list(gaze_dict.values()), dim=0)), dim=0)
             pre_gaze = gaze_list.mean(dim=0)
             pre_gaze = pre_gaze*np.pi/180
@@ -314,7 +324,12 @@ def test(args, dataset):
                         gaze, gaze_dict, rotmat_dict = net(input)
                         for degree in args.degree:
                             rot_gaze = gaze_dict[f"out_{degree}_gaze"]
-                            gaze_dict[f"out_{degree}_gaze"] = torch.sub(rot_gaze, degree)
+                            rot_matrix = rotmat_dict[f"rot_{degree}_matrix"]
+                            rot_matrix = rot_matrix.view(rot_matrix.shape[0], 3, 3)
+                            inv_gaze = utils.inverse_rotation(rot_matrix, rot_gaze)
+                            gaze_dict[f"out_{degree}_gaze"] = inv_gaze
+
+                            # gaze_dict[f"out_{degree}_gaze"] = torch.sub(rot_gaze, degree)
                         gaze_list = torch.cat((gaze.unsqueeze(0), torch.stack(list(gaze_dict.values()), dim=0)), dim=0)
                         pre_gaze = gaze_list.mean(dim=0)
                         pre_gaze = pre_gaze*np.pi/180   
@@ -386,7 +401,7 @@ if __name__ == "__main__":
     parser.add_argument('--decayratio', type=float, 
                         default=0.9, help="学习率衰减因子，只源域")
     parser.add_argument('--epoches', type=int, 
-                        default=20, help='源域训练总 epoches')
+                        default=30, help='源域训练总 epoches')
     parser.add_argument('--source', type=str, 
                         default='gaze360', help='source dataset, eth/gaze360')
     parser.add_argument('--target', type=str, 
@@ -409,10 +424,10 @@ if __name__ == "__main__":
     os.makedirs(args.savepath, exist_ok=True)
     # 留存每个实验的说明
     with open(os.path.join(args.root, 'readme.txt'), 'a') as file:
-        file.write(f'{current_time}: MultiRotCon_addGamma网络。加入旋转矩阵，直接跨域。' + '\n')
+        file.write(f'{current_time}: MultiRotCon_addGamma网络。加入旋转矩阵，直接跨域。利用旋转矩阵还原角度计算损失。' + '\n')
     # 复制文件
     train_code_path = os.path.abspath(__file__)
-    shutil.copy(train_code_path, os.path.join(args.root, f'{current_time}/{os.path.basename(train_code_path)}'))
+    shutil.copy(train_code_path, os.path.join(savepath, f'{os.path.basename(train_code_path)}'))
 
     # Load configuration
     config = yaml.load(open("datapath.yaml"), Loader=yaml.FullLoader)
