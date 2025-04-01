@@ -155,9 +155,9 @@ def gaze_to_vector(gaze):
     pitch = torch.deg2rad(gaze[:, 1])  # 提取 pitch 并转换为弧度
 
     # 计算三维单位向量
-    x = torch.cos(pitch) * torch.cos(yaw)
-    y = torch.cos(pitch) * torch.sin(yaw)
-    z = torch.sin(pitch)
+    x = -torch.cos(pitch) * torch.sin(yaw)
+    y = -torch.sin(pitch)
+    z = -torch.cos(pitch) * torch.cos(yaw)
 
     # 堆叠成 [B, 3] 的形状
     return torch.stack([x, y, z], axis=1)
@@ -213,9 +213,9 @@ def compute_rotation_degree(R, g1):
     v2_rotated_norm = F.normalize(v2_rotated, p=2, dim=1)  # p=2 表示 L2 范数，dim=1 对每个样本的 3D 向量归一化
 
     # 从旋转后的向量中提取新的 yaw 和 pitch
-    pitch2 = torch.asin(v2_rotated_norm[:, 2])  # 形状 [B]
+    pitch2 = torch.asin(-v2_rotated_norm[:, 1])  # 形状 [B]
     cos_pitch2 = torch.cos(pitch2) + 1e-10
-    yaw2 = torch.atan2(v2_rotated_norm[:, 1]/cos_pitch2, v2_rotated_norm[:, 0]/cos_pitch2)
+    yaw2 = torch.atan2(-v2_rotated_norm[:, 0]/cos_pitch2, -v2_rotated_norm[:, 2]/cos_pitch2)
 
     g2_rot = torch.rad2deg(torch.stack([yaw2, pitch2], dim=1))  # 形状 [B, 2]
 
@@ -240,9 +240,9 @@ def inverse_rotation(R, g2):
     v1_rotated_norm = F.normalize(v1_rotated, p=2, dim=1)  # p=2 表示 L2 范数，dim=1 对每个样本的 3D 向量归一化
 
     # 从旋转后的向量中提取新的 yaw 和 pitch
-    pitch1 = torch.asin(v1_rotated_norm[:, 2])  # 形状 [B]
+    pitch1 = torch.asin(-v1_rotated_norm[:, 1])  # 形状 [B]
     cos_pitch1 = torch.cos(pitch1) + 1e-10
-    yaw1 = torch.atan2(v1_rotated_norm[:, 1]/cos_pitch1, v1_rotated_norm[:, 0]/cos_pitch1)
+    yaw1 = torch.atan2(-v1_rotated_norm[:, 0]/cos_pitch1, -v1_rotated_norm[:, 2]/cos_pitch1)
 
     # 将弧度转换回角度
     g1_inverted = torch.rad2deg(torch.stack([yaw1, pitch1], dim=1))  # 形状 [B, 2]

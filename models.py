@@ -112,6 +112,104 @@ class RotConGE(nn.Module):
         return output_gaze, angular_output, rotation_matrix
 
 
+"""利用世界坐标系下，固定旋转角度则旋转矩阵固定的特性。将旋转矩阵作为全连接层的参数对旋转角度进行还原。"""
+class mlp_matgazeEs(nn.Module):
+    def __init__(self, channel, flag=True, drop_p=0.5):
+        super(mlp_matgazeEs, self).__init__()
+        self.flag = flag
+        self.avgpool = nn.AdaptiveAvgPool2d((1,1))
+        self.drop = nn.Dropout(drop_p)
+        self.fc1 = nn.Linear(channel, 1000)
+        self.fc2 = nn.Linear(1000, channel)
+        self.fc3_g = nn.Linear(channel, 2)
+        self.fc3_m1 = nn.Linear(channel, 9)
+        self.fc3_m2 = nn.Linear(channel, 9)
+
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+
+    def forward(self, x):
+        x = self.avgpool(x)
+        x = x.view(x.size(0), -1)
+        x = nn.ReLU()(self.fc1(x))
+        x = self.fc2(x)
+        x = self.drop(x)
+        if self.flag:
+            x_g = self.fc3_g(x)
+            x_m1 = self.fc3_m1(x)
+            x_m2 = self.fc3_m2(x)
+            return x_g, x_m1, x_m2
+        else:
+            x_g = self.fc3_g(x)
+            return x_g
+
+
+class fc_matgazeEs(nn.Module):
+    def __init__(self, channel, flag=True, drop_p=0.5):
+        super(fc_matgazeEs, self).__init__()
+        self.flag = flag
+        self.avgpool = nn.AdaptiveAvgPool2d((1,1))
+        self.drop = nn.Dropout(drop_p)
+        self.fc = nn.Linear(channel, 2)
+        self.fc_m1 = nn.Linear(channel, 9)
+        self.fc_m2 = nn.Linear(channel, 9)
+
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+
+    def forward(self, x):
+        x = self.avgpool(x)
+        x_1d = torch.flatten(x, start_dim=1)
+        x_1d = self.drop(x_1d)
+        if self.flag:
+            x_g = self.fc(x_1d)
+            x_m1 = self.fc_m1(x_1d)
+            x_m2 = self.fc_m2(x_1d)
+            return x_g, x_m1, x_m2
+        else:
+            x_g = self.fc(x_1d)
+            return x_g
+
+
+class MatRotGE(nn.Module):
+    def __init__(self, backbone = "res18", degree_list = [2]):
+        super(MatRotGE, self).__init__()
+        self.degree = degree_list
+        self.img_feature_dim = 512  # the dimension of the CNN feature to represent each frame
+        if backbone == "res18":
+            self.base_model = resnet18(pretrained=True)
+        elif backbone == "res50":
+            self.base_model = resnet50(pretrained=True)
+
+        self.gazeEs = mlp_matgazeEs(self.img_feature_dim, flag=False)
+        # Create a ModuleList for the rotate degree outputs
+        self.rotate_gazeEs = nn.ModuleList([
+          mlp_matgazeEs(self.img_feature_dim) for _ in range(len(degree_list))
+        ])
+
+    def forward(self, x_in):
+        base_features = self.base_model(x_in)
+        output_gaze = self.gazeEs(base_features)
+
+        angular_output = {}
+        rotation_matrix = {}
+        for i, layer in enumerate(self.rotate_gazeEs):
+            degree = self.degree[i]
+            output_degree_gaze, output_yaw_matrix, output_pitch_matrix = layer(base_features)
+            angular_output[f"out_{degree}_gaze"] = output_degree_gaze
+            rotation_matrix[f"rot_yaw_{degree}_matrix"] = output_yaw_matrix
+            rotation_matrix[f"rot_pitch_{degree}_matrix"] = output_pitch_matrix
+
+        return output_gaze, angular_output, rotation_matrix
+
 
 class UncertaintyWPseudoLabelLoss(nn.Module):
     def __init__(self, lamda_pseudo = 0.0001):
@@ -134,34 +232,21 @@ class MinimumVarianceLoss(nn.Module):
 
 """一种复杂回归"""
 class GAZEnet(nn.Module):
-    def __init__(self, drop_p=0.5):
+    def __init__(self, channel):
         super(GAZEnet, self).__init__()
-        self.img_feature_dim = 512
-
-        self.gazeNet = nn.Sequential(
-            CBAM(512),
-            nn.Conv2d(512, 512, 3, stride=1, padding=1),
-            nn.BatchNorm2d(512),
-            nn.ReLU(),
-            nn.Conv2d(512, 512, 3, stride=1, padding=1),
-            nn.BatchNorm2d(512),
-            nn.ReLU(),
-            nn.Conv2d(512, 512, 3, stride=1, padding=1),
-            nn.BatchNorm2d(512),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2, padding=0, dilation=1, ceil_mode=False)
-        )
-
-        self.avgpool = nn.AdaptiveAvgPool2d((1,1))
-        self.last_layer = nn.Linear(self.img_feature_dim, 2)
-        self.drop = nn.Dropout(drop_p)
+        self.cbam = CBAM(channel)
+        self.conv2d = nn.Conv2d(channel, channel, 3, stride=1, padding=1)
+        self.relu = nn.ReLU(inplace=True)
+        self.bn = nn.BatchNorm2d(channel)
+        self.maxpool = nn.MaxPool2d(kernel_size=2, stride=2, padding=0, dilation=1, ceil_mode=False)
 
     def forward(self, x):
-        x = self.gazeNet(x)
-        x = self.avgpool(x)
-        base_out = torch.flatten(x, start_dim=1)
-        output = self.drop(base_out)
-        out = self.last_layer(output)
+        x_cbam = self.cbam(x)
+        x_1 = self.relu(self.bn(self.conv2d(x_cbam)))
+        x_2 = self.relu(self.bn(self.conv2d(x_1)))
+        x_3 = self.relu(self.bn(self.conv2d(x_2)))
+        out = self.maxpool(x_3)
+
         return out
 
 
