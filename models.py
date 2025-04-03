@@ -149,14 +149,11 @@ class mlp_matgazeEs(nn.Module):
 
 
 class fc_matgazeEs(nn.Module):
-    def __init__(self, channel, flag=True, drop_p=0.5):
+    def __init__(self, channel, drop_p=0.5):
         super(fc_matgazeEs, self).__init__()
-        self.flag = flag
         self.avgpool = nn.AdaptiveAvgPool2d((1,1))
         self.drop = nn.Dropout(drop_p)
         self.fc = nn.Linear(channel, 2)
-        self.fc_m1 = nn.Linear(channel, 9)
-        self.fc_m2 = nn.Linear(channel, 9)
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -169,14 +166,32 @@ class fc_matgazeEs(nn.Module):
         x = self.avgpool(x)
         x_1d = torch.flatten(x, start_dim=1)
         x_1d = self.drop(x_1d)
-        if self.flag:
-            x_g = self.fc(x_1d)
-            x_m1 = self.fc_m1(x_1d)
-            x_m2 = self.fc_m2(x_1d)
-            return x_g, x_m1, x_m2
-        else:
-            x_g = self.fc(x_1d)
-            return x_g
+        x_g = self.fc(x_1d)
+        return x_g
+
+
+class fc_rotMat(nn.Module):
+    def __init__(self, channel, drop_p=0.5):
+        super(fc_rotMat, self).__init__()
+        self.avgpool = nn.AdaptiveAvgPool2d((1,1))
+        self.drop = nn.Dropout(drop_p)
+        self.fc_y = nn.Linear(channel, 9)
+        self.fc_p = nn.Linear(channel, 9)
+
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+
+    def forward(self, x):
+        x = self.avgpool(x)
+        x_1d = torch.flatten(x, start_dim=1)
+        x_1d = self.drop(x_1d)
+        x_my = self.fc_y(x_1d)
+        x_mp = self.fc_p(x_1d)
+        return x_my, x_mp
 
 
 class MatRotGE(nn.Module):
@@ -189,10 +204,10 @@ class MatRotGE(nn.Module):
         elif backbone == "res50":
             self.base_model = resnet50(pretrained=True)
 
-        self.gazeEs = mlp_matgazeEs(self.img_feature_dim, flag=False)
+        self.gazeEs = fc_matgazeEs(self.img_feature_dim)
         # Create a ModuleList for the rotate degree outputs
         self.rotate_gazeEs = nn.ModuleList([
-          mlp_matgazeEs(self.img_feature_dim) for _ in range(len(degree_list))
+          fc_matgazeEs(self.img_feature_dim) for _ in range(len(degree_list))
         ])
 
     def forward(self, x_in):
@@ -200,21 +215,19 @@ class MatRotGE(nn.Module):
         output_gaze = self.gazeEs(base_features)
 
         angular_output = {}
-        rotation_matrix = {}
         for i, layer in enumerate(self.rotate_gazeEs):
             degree = self.degree[i]
-            output_degree_gaze, output_yaw_matrix, output_pitch_matrix = layer(base_features)
+            output_degree_gaze = layer(base_features)
             angular_output[f"out_{degree}_gaze"] = output_degree_gaze
-            rotation_matrix[f"rot_yaw_{degree}_matrix"] = output_yaw_matrix
-            rotation_matrix[f"rot_pitch_{degree}_matrix"] = output_pitch_matrix
 
-        return output_gaze, angular_output, rotation_matrix
+        return output_gaze, angular_output
 
 
 class UncertaintyWPseudoLabelLoss(nn.Module):
     def __init__(self, lamda_pseudo = 0.0001):
         super(UncertaintyWPseudoLabelLoss, self).__init__()
         self.lamda_pseudo = lamda_pseudo 
+
     def forward(self, gaze, pseudo):
         std = torch.std(gaze, dim=0) # gaze [6, b, 2]
         pseudo = pseudo.unsqueeze(0)
@@ -224,6 +237,7 @@ class UncertaintyWPseudoLabelLoss(nn.Module):
 class MinimumVarianceLoss(nn.Module):
     def __init__(self):
         super(MinimumVarianceLoss, self).__init__()
+
     def forward(self, gaze):
         # std = torch.std(gaze, dim=0) # gaze [6, b, 2]
         std = torch.var(gaze, dim=0) # gaze [6, b, 2]

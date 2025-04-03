@@ -126,10 +126,11 @@ def train(args, dataset, valid_dataset):
     logging.info("optimizer building")
     # 定义损失函数
     lossfunc = getattr(nn, args.loss)().cuda()
+    lossfunc_var = models.UncertaintyWPseudoLabelLoss().cuda()
     # 创建优化器字典
     optimizers = {
         'base_model': optim.Adam(net.base_model.parameters(), lr=args.lr, betas=(0.9, 0.95)),
-        'gazeEs': optim.Adam(net.gazeEs.parameters(), lr=args.lr, betas=(0.9, 0.95)),
+        'gazeEs': optim.Adam(net.gazeEs.parameters(), lr=args.lr, betas=(0.9, 0.95))
     }
     # 动态为 rotate_*_degree 模块创建优化器
     for i, degree in enumerate(args.degree):
@@ -137,7 +138,8 @@ def train(args, dataset, valid_dataset):
     # 创建调度器字典
     schedulers = {}
     for key, optimizer in optimizers.items():
-        schedulers[key] = optim.lr_scheduler.StepLR(optimizer, step_size=args.decaysteps, gamma=args.decayratio)
+        # schedulers[key] = optim.lr_scheduler.StepLR(optimizer, step_size=args.decaysteps, gamma=args.decayratio)
+        schedulers[key] = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=args.max_lr, epochs=args.epoches, steps_per_epoch=len(dataset))
 
     # 开始训练
     logging.info("=====Traning=====")
@@ -161,43 +163,42 @@ def train(args, dataset, valid_dataset):
                         save_image(face_name, input[k].cpu().numpy())
         
                 # forward
-                gaze, gaze_dict, rotmat_dict = net(input)
+                gaze, gaze_dict = net(input)
 
                 loss_gaze = lossfunc(gaze, target)
                 loss_rot_gaze = []
                 loss_degree_gaze_list = []
-                loss_degree_rotmat_list = []
+                result_gaze = [gaze]
                 for degree in args.degree:
                     # 旋转角度
-                    theta = torch.tensor(np.sign(degree) * 2)
-                    # 利用标签计算旋转矩阵损失
+                    theta = torch.tensor(degree)
+                    # 利用标签计算旋转矩阵
                     tg_yaw_rot_matrix = compute_rot_matrix(input.size(0), theta, mode='yaw')
                     tg_yaw_rot_matrix = tg_yaw_rot_matrix.to(args.device)
                     tg_pitch_rot_matrix = compute_rot_matrix(input.size(0), theta, mode='pitch')
                     tg_pitch_rot_matrix = tg_pitch_rot_matrix.to(args.device)
-                    yaw_rot_matrix = rotmat_dict[f"rot_yaw_{degree}_matrix"]
-                    yaw_rot_matrix = yaw_rot_matrix.view(yaw_rot_matrix.shape[0], 3, 3)
-                    pitch_rot_matrix = rotmat_dict[f"rot_pitch_{degree}_matrix"]
-                    pitch_rot_matrix = pitch_rot_matrix.view(pitch_rot_matrix.shape[0], 3, 3)
-                    loss_degree_rotmat = lossfunc(yaw_rot_matrix, tg_yaw_rot_matrix) + lossfunc(pitch_rot_matrix, tg_pitch_rot_matrix)
-                    loss_degree_rotmat_list.append(loss_degree_rotmat)
                     # 利用旋转矩阵还原旋转角为原角度
                     rot_gaze = gaze_dict[f"out_{degree}_gaze"]
-                    inv_gaze = rotate.multi_inverse_rotation(degree, rot_gaze, yaw_rot_matrix, pitch_rot_matrix)
+                    # inv_gaze = rotate.multi_inverse_rotation(degree, rot_gaze, tg_yaw_rot_matrix, tg_pitch_rot_matrix)
+                    inv_gaze = rotate.inverse_rotation(rot_gaze, tg_yaw_rot_matrix, tg_pitch_rot_matrix)
+                    result_gaze.append(inv_gaze)
                     loss_degree_gaze = lossfunc(inv_gaze, target)
                     loss_degree_gaze_list.append(loss_degree_gaze)
-
-                    loss_value = 0.1*loss_degree_gaze + 10*loss_degree_rotmat
-                    loss_rot_gaze.append(loss_value)
+                    loss_rot_gaze.append(loss_degree_gaze)
+                
+                #计算一个所有预测角度的方差损失
+                loss_var = lossfunc_var(torch.stack(result_gaze, dim=0), target)
+                loss = loss_gaze + loss_var
+                # loss_rot_gaze = [loss_value + loss_var for loss_value in loss_rot_gaze]
                 
                 [optimizer.zero_grad() for name, optimizer in optimizers.items()]
                 
-                # 冻结 rotate_*_degree 所有全连接层
+                # 冻结 rotate_*_degree
                 for param in net.rotate_gazeEs.parameters():
                     param.requires_grad = False
 
-                # backward，利用没有进行角度旋转的更新主干网络
-                loss_gaze.backward(retain_graph=True)
+                # backward，利用没有进行角度旋转的支路更新主干网络
+                loss.backward(retain_graph=True)
 
                 # 冻结 base_model和gazeEs
                 for param in net.base_model.parameters():
@@ -226,16 +227,15 @@ def train(args, dataset, valid_dataset):
                 writer.add_scalar("learning_rate", current_lr, cur)
                 """tensorboard writer"""
                 writer.add_scalar("train/loss_gaze", loss_gaze, cur)
+                writer.add_scalar("train/loss_var", loss_var, cur)
                 for idx, degree in enumerate(args.degree):
                     writer.add_scalar(f"train/loss_degree_gaze/degree=[{degree}]", loss_degree_gaze_list[idx], cur)
-                for idx, degree in enumerate(args.degree):
-                    writer.add_scalar(f"train/loss_degree_rotmat/degree=[{degree}]", loss_degree_rotmat_list[idx], cur)
 
                 # print logs
                 if i % 20 == 0:
                     timeend = time.time()
                     resttime = (timeend - timebegin)/cur * (total-cur)/3600
-                    log = f"[{epoch}/{args.epoches}]: [{i}/{length}] loss_gaze:{'%.8f' % loss_gaze} loss_degree_rotmat:{[f'{x:.8f}' for x in loss_degree_rotmat_list]} " \
+                    log = f"[{epoch}/{args.epoches}]: [{i}/{length}] loss_gaze:{'%.8f' % loss_gaze} loss_var:{'%.8f' % loss_var} " \
                         f"loss_degree_gaze:{[f'{x:.8f}' for x in loss_degree_gaze_list]} lr:{current_lr}, rest time:{resttime:.2f}h"
                     logging.info(log)
                     outfile.write(log + "\n")
@@ -283,14 +283,18 @@ def valid(args, ckpt, dataset):
             target = move_to_gpu(data['gaze'], args.device)
             target = target.float()*np.pi/180
 
-            gaze, gaze_dict, rotmat_dict = net(input)
+            gaze, gaze_dict = net(input)
             for degree in args.degree:
+                # 旋转角度
+                theta = torch.tensor(degree)
+                # 利用标签计算旋转矩阵
+                tg_yaw_rot_matrix = compute_rot_matrix(input.size(0), theta, mode='yaw')
+                tg_yaw_rot_matrix = tg_yaw_rot_matrix.to(args.device)
+                tg_pitch_rot_matrix = compute_rot_matrix(input.size(0), theta, mode='pitch')
+                tg_pitch_rot_matrix = tg_pitch_rot_matrix.to(args.device)
                 rot_gaze = gaze_dict[f"out_{degree}_gaze"]
-                yaw_rot_matrix = rotmat_dict[f"rot_yaw_{degree}_matrix"]
-                yaw_rot_matrix = yaw_rot_matrix.view(yaw_rot_matrix.shape[0], 3, 3)
-                pitch_rot_matrix = rotmat_dict[f"rot_pitch_{degree}_matrix"]
-                pitch_rot_matrix = pitch_rot_matrix.view(pitch_rot_matrix.shape[0], 3, 3)
-                inv_gaze = rotate.multi_inverse_rotation(degree, rot_gaze, yaw_rot_matrix, pitch_rot_matrix)
+                # inv_gaze = rotate.multi_inverse_rotation(degree, rot_gaze, tg_yaw_rot_matrix, tg_pitch_rot_matrix)
+                inv_gaze = rotate.inverse_rotation(rot_gaze, tg_yaw_rot_matrix, tg_pitch_rot_matrix)
                 gaze_dict[f"out_{degree}_gaze"] = inv_gaze
 
                 # gaze_dict[f"out_{degree}_gaze"] = torch.sub(rot_gaze, degree)
@@ -313,8 +317,7 @@ def valid(args, ckpt, dataset):
 
 def test(args, dataset):
     logging.info("=====Testing=====")
-    # ckptpath = os.path.join(args.savepath, f"checkpoint")
-    ckptpath = '/media/ts/0074477d-81c5-4692-b399-7ccecf34dbb6/GazeEstimation/ts-record/ts-MultiRotCon_addGamma/20250401_101848/checkpoint'
+    ckptpath = os.path.join(args.savepath, f"checkpoint")
     outputpath = os.path.join(args.savepath, f"evaluation")
     if not os.path.exists(outputpath):
         os.makedirs(outputpath)
@@ -352,21 +355,22 @@ def test(args, dataset):
                         target = target.float()*np.pi/180
                         names = data["name"]
 
-                        gaze, gaze_dict, rotmat_dict = net(input)
-                        result_dict  ={}
+                        gaze, gaze_dict= net(input)
                         for degree in args.degree:
-                            if degree == 6 or degree == -6:
-                                continue
+                            # 旋转角度
+                            theta = torch.tensor(degree)
+                            # 利用标签计算旋转矩阵
+                            tg_yaw_rot_matrix = compute_rot_matrix(input.size(0), theta, mode='yaw')
+                            tg_yaw_rot_matrix = tg_yaw_rot_matrix.to(args.device)
+                            tg_pitch_rot_matrix = compute_rot_matrix(input.size(0), theta, mode='pitch')
+                            tg_pitch_rot_matrix = tg_pitch_rot_matrix.to(args.device)
                             rot_gaze = gaze_dict[f"out_{degree}_gaze"]
-                            yaw_rot_matrix = rotmat_dict[f"rot_yaw_{degree}_matrix"]
-                            yaw_rot_matrix = yaw_rot_matrix.view(yaw_rot_matrix.shape[0], 3, 3)
-                            pitch_rot_matrix = rotmat_dict[f"rot_pitch_{degree}_matrix"]
-                            pitch_rot_matrix = pitch_rot_matrix.view(pitch_rot_matrix.shape[0], 3, 3)
-                            inv_gaze = rotate.multi_inverse_rotation(degree, rot_gaze, yaw_rot_matrix, pitch_rot_matrix)
-                            result_dict[f"out_{degree}_gaze"] = inv_gaze
+                            # inv_gaze = rotate.multi_inverse_rotation(degree, rot_gaze, tg_yaw_rot_matrix, tg_pitch_rot_matrix)
+                            inv_gaze = rotate.inverse_rotation(rot_gaze, tg_yaw_rot_matrix, tg_pitch_rot_matrix)
+                            gaze_dict[f"out_{degree}_gaze"] = inv_gaze
 
                             # gaze_dict[f"out_{degree}_gaze"] = torch.sub(rot_gaze, degree)
-                        gaze_list = torch.cat((gaze.unsqueeze(0), torch.stack(list(result_dict.values()), dim=0)), dim=0)
+                        gaze_list = torch.cat((gaze.unsqueeze(0), torch.stack(list(gaze_dict.values()), dim=0)), dim=0)
                         pre_gaze = gaze_list.mean(dim=0)
                         pre_gaze = pre_gaze*np.pi/180   
 
@@ -432,12 +436,14 @@ if __name__ == "__main__":
                         default=128, help='源域训练 batch size')
     parser.add_argument('--lr', type=float, 
                         default=1e-4, help="源域训练初始 learning rate")
+    parser.add_argument('--max_lr', type=float, 
+                        default=1e-3, help="源域训练最大 learning rate")
     parser.add_argument('--decaysteps', type=int, 
                         default=5000, help="学习率衰减步数，只源域")
     parser.add_argument('--decayratio', type=float, 
-                        default=0.9, help="学习率衰减因子，只源域")
+                        default=0.5, help="学习率衰减因子，只源域")
     parser.add_argument('--epoches', type=int, 
-                        default=30, help='源域训练总 epoches')
+                        default=20, help='源域训练总 epoches')
     parser.add_argument('--source', type=str, 
                         default='gaze360', help='source dataset, eth/gaze360')
     parser.add_argument('--target', type=str, 
@@ -460,7 +466,7 @@ if __name__ == "__main__":
     os.makedirs(args.savepath, exist_ok=True)
     # 留存每个实验的说明
     with open(os.path.join(args.root, 'readme.txt'), 'a') as file:
-        file.write(f'{current_time}: multiMatRot网络。加入旋转矩阵，直接跨域。利用世界坐标系下，固定旋转角度则旋转矩阵固定的特性。利用旋转矩阵还原角度计算损失。减少全连接层的数量。学习率衰减。仅测试，网络权重为20250401_101848的训练结果，测试时不使用 degree=±6 支路。' + '\n')
+        file.write(f'{current_time}: multiMatRot网络。加入旋转矩阵，直接跨域。利用世界坐标系下，固定旋转角度则旋转矩阵固定的特性。利用旋转矩阵还原角度计算损失。还原角度不再多次乘2角度旋转矩阵，直接是对应的旋转角度的旋转矩阵。改变学习率更新方式，采用OneCycleLR 。原视线+方差更新backbone，旋转视线更新各支路。' + '\n')
     # 复制文件
     train_code_path = os.path.abspath(__file__)
     shutil.copy(train_code_path, os.path.join(savepath, f'{os.path.basename(train_code_path)}'))
@@ -497,7 +503,7 @@ if __name__ == "__main__":
 
     _, valid_dataset_source = datareader.txtload(validpath_source, imagepath_source, args.batch_size,
                                  shuffle=True, num_workers=2, header=True, data_type=args.source)
-    # train(args, dataset_source, valid_dataset_source)
+    train(args, dataset_source, valid_dataset_source)
 
     # read target data for test
     logging.info(f"======read target data={args.target}======")
